@@ -6,7 +6,8 @@ JQ ?= jq
 SED ?= sed
 ARCH := $(shell uname -m | $(SED) 's/x86_64/x86/' | $(SED) 's/aarch64/arm64/' | $(SED) 's/ppc64le/powerpc/' | $(SED) 's/mips.*/mips/')
 BPFCOVLIB_DIR ?= $(abspath ../../build/lib)
-BPFTOOL ?= ../tools/bpftool/src/bpftool
+BPFTOOL ?= $(abspath ../tools/bpftool/src/bpftool)
+BPFTOOL_DIR ?= $(abspath ../tools/bpftool/src/)
 LIBBPF_DIR := $(abspath ../libbpf)
 LIBBPF_SRC := $(abspath $(LIBBPF_DIR)/src)
 LIBBPF_OBJ := $(abspath $(OUTPUT)/libbpf.a)
@@ -63,6 +64,7 @@ $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(OUTPU
 
 $(BPFTOOL):
 	$(call msg,BPFTOOL,$(BPFTOOL))
+	$(Q)$(MAKE) -C $(BPFTOOL_DIR)
 	$(Q)$(BPFTOOL) version -j | $(JQ) -e '.features.skeletons' || $(error "A bptfool with the skeletons feature is required")
 
 # Generate vmlinux.h
