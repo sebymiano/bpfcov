@@ -34,9 +34,11 @@
 #include "llvm/PassRegistry.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Passes/OptimizationLevel.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/IR/Verifier.h"
 
 static constexpr char PassArg[] = "bpf-cov";
 static constexpr char PassName[] = "BPF Coverage Pass";
@@ -94,6 +96,44 @@ namespace
         return true;
     }
 
+    bool fixupCompilerUsedGlobals(Module &M) {
+        auto U = M.getNamedGlobal("llvm.compiler.used");
+        if (!U || !U->hasInitializer()) {
+            return false;
+        }
+
+        SmallVector<Constant *, 8> CompilerUsedGlobals;
+        auto UArray = dyn_cast<ConstantArray>(U->getInitializer());
+        auto NElems = UArray->getNumOperands();
+        for (unsigned int i = 0; i < NElems; i++) {
+            if (ConstantExpr *CE = dyn_cast<ConstantExpr>(UArray->getOperand(i))) {
+                auto OC = CE->getOpcode();
+                if (OC == Instruction::BitCast || OC == Instruction::GetElementPtr) {
+                    if (GlobalValue *GV = dyn_cast<GlobalValue>(CE->getOperand(0))) {
+                        auto Name = GV->getName();
+                        if (!Name.startswith("__llvm_profile_runtime") && !Name.startswith("__profd") && !Name.startswith("__covrec") && !Name.startswith("__llvm_coverage"))
+                            CompilerUsedGlobals.push_back(UArray->getOperand(i));
+                    }
+                }
+            } else if (GlobalValue *GV = dyn_cast<GlobalValue>(UArray->getOperand(i))) {
+                auto Name = GV->getName();
+                if (!Name.startswith("__llvm_profile_runtime") && !Name.startswith("__profd") && !Name.startswith("__covrec") && !Name.startswith("__llvm_coverage"))
+                    CompilerUsedGlobals.push_back(UArray->getOperand(i));
+            }
+        }
+
+        if (CompilerUsedGlobals.size() < NElems) {
+            errs() << "fixing llvm.compiler.used\n";
+            U->eraseFromParent();
+            ArrayType *AType = ArrayType::get(Type::getInt8PtrTy(M.getContext()), CompilerUsedGlobals.size());
+            U = new GlobalVariable(M, AType, false, GlobalValue::AppendingLinkage, ConstantArray::get(AType, CompilerUsedGlobals), "llvm.compiler.used");
+            U->setSection("llvm.metadata");
+            return true;
+        }
+
+        return false;
+    }
+
     bool fixupUsedGlobals(Module &M)
     {
         auto U = M.getNamedGlobal("llvm.used");
@@ -147,7 +187,7 @@ namespace
         return false;
     }
 
-    bool swapSectionWithPrefix(Module &M, StringRef Prefix, StringRef New)
+    bool swapSectionWithPrefix(Module &M, StringRef Prefix, StringRef New, int Align = 0)
     {
         bool Changed = false;
         for (auto gv_iter = M.global_begin(); gv_iter != M.global_end(); gv_iter++)
@@ -157,6 +197,10 @@ namespace
             {
                 errs() << "swapping " << GV->getName() << " section with " << New << " \n";
                 GV->setSection(New);
+                if (Align)
+                {
+                    GV->setAlignment(MaybeAlign(Align));
+                }
                 Changed = true;
             }
         }
@@ -177,7 +221,35 @@ namespace
             if (GV->hasName())
             {
                 auto Name = GV->getName();
-                if (Name.startswith("__profd") && GV->getValueType()->isStructTy())
+
+                if (Name.startswith("__profc") && GV->getValueType()->isArrayTy()) {
+                    auto *Initializer = GV->getInitializer();
+                    auto *arrayTy = dyn_cast<ArrayType>(GV->getValueType());
+                    if (!arrayTy) {
+                        errs() << GV->getName() << ": not an array type\n";
+                        return false;
+                    }
+
+                    // Create a new global variable
+                    auto *NewGV = new GlobalVariable(
+                        M,
+                        /*Ty=*/arrayTy,
+                        /*isConstant=*/GV->isConstant(),
+                        /*Linkage=*/GlobalVariable::ExternalLinkage,
+                        /*Initializer=*/Initializer,
+                        /*Name=*/GV->getName(),
+                        /*InsertBefore=*/GV
+                    );
+
+                    NewGV->setDSOLocal(true);
+                    NewGV->setAlignment(GV->getAlign());
+                    NewGV->setSection(".data.profc");
+
+                    GV->replaceAllUsesWith(NewGV);
+
+                    ToDelete.push_back(GV);
+                    Changed = true;
+                } else if (Name.startswith("__profd") && GV->getValueType()->isStructTy())
                 {
                     errs() << "converting " << Name << " struct to globals\n";
 
@@ -206,7 +278,7 @@ namespace
                     GV0->setAlignment(MaybeAlign(8));
                     GV0->setSection(GV->getSection());
 
-                    appendToUsed(M, GV0);
+                    appendToCompilerUsed(M, GV0);
 
                     Changed = true;
 
@@ -235,7 +307,7 @@ namespace
                     GV1->setAlignment(MaybeAlign(8));
                     GV1->setSection(GV->getSection());
 
-                    appendToUsed(M, GV1);
+                    appendToCompilerUsed(M, GV1);
 
                     // Get the number of counters for current __profd_*
                     ConstantInt *C5 = dyn_cast<ConstantInt>(GV->getInitializer()->getOperand(5));
@@ -265,7 +337,7 @@ namespace
                     GV2->setDSOLocal(true);
                     GV2->setAlignment(MaybeAlign(8));
                     GV2->setSection(GV->getSection());
-                    appendToUsed(M, GV2);
+                    appendToCompilerUsed(M, GV2);
 
                     // Increment the counter offset for the next __profd_*
                     CountersSizeAcc += NumCounters * 8;
@@ -282,7 +354,7 @@ namespace
                     GV3->setDSOLocal(true);
                     GV3->setAlignment(MaybeAlign(8));
                     GV3->setSection(GV->getSection());
-                    appendToUsed(M, GV3);
+                    appendToCompilerUsed(M, GV3);
 
                     auto *GV4 = new GlobalVariable(
                         M,
@@ -295,7 +367,7 @@ namespace
                     GV4->setDSOLocal(true);
                     GV4->setAlignment(MaybeAlign(8));
                     GV4->setSection(GV->getSection());
-                    appendToUsed(M, GV4);
+                    appendToCompilerUsed(M, GV4);
 
                     // Translate the number of counters (that this data refers to) to a global scalar
                     auto NumCountersC = ConstantInt::get(Ty5, NumCounters, true);
@@ -310,7 +382,7 @@ namespace
                     GV5->setDSOLocal(true);
                     GV5->setAlignment(MaybeAlign(4));
                     GV5->setSection(GV->getSection());
-                    appendToUsed(M, GV5);
+                    appendToCompilerUsed(M, GV5);
 
                     // Translate the value sites [2 x i16] into a single i32
                     auto *GV6 = new GlobalVariable(
@@ -324,7 +396,7 @@ namespace
                     GV6->setDSOLocal(true);
                     GV6->setAlignment(MaybeAlign(4));
                     GV6->setSection(GV->getSection());
-                    appendToUsed(M, GV6);
+                    appendToCompilerUsed(M, GV6);
 
                     ToDelete.push_back(GV);
                 }
@@ -382,7 +454,7 @@ namespace
 
                     Changed = true;
 
-                    appendToUsed(M, GV0);
+                    appendToCompilerUsed(M, GV0);
 
                     ConstantDataArray *C1 = dyn_cast<ConstantDataArray>(GV->getInitializer()->getOperand(1));
                     if (!C1)
@@ -409,7 +481,7 @@ namespace
                     GV1->setAlignment(MaybeAlign(1));
                     GV1->setSection(GV->getSection());
 
-                    appendToUsed(M, GV1);
+                    appendToCompilerUsed(M, GV1);
 
                     ToDelete.push_back(GV);
                 }
@@ -657,38 +729,86 @@ PreservedAnalyses BPFCov::run(Module &M, ModuleAnalysisManager &MAM)
     return (changed ? PreservedAnalyses::none() : PreservedAnalyses::all());
 }
 
-bool BPFCov::runOnModule(Module &M)
-{
-    errs() << "module: " << M.getName() << "\n"; // LLVM_DEBUG(dbgs() << "");
+bool BPFCov::runOnModule(Module &M) {
+    errs() << "module: " << M.getName() << "\n";
 
     bool instrumented = false;
 
     // Bail out when missing debug info
-    if (M.debug_compile_units().empty())
-    {
+    if (M.debug_compile_units().empty()) {
         errs() << "Missing debug info\n";
         return instrumented;
     }
 
-    // This sequence is not random at all
+    // Delete global constructors
     instrumented |= deleteGVarByName(M, "llvm.global_ctors");
+    if (verifyModule(M, &errs())) {
+        errs() << "Module verification failed after deleting global constructors\n";
+        return false;
+    }
+
+    // Delete profile-related functions
     instrumented |= deleteFuncByName(M, "__llvm_profile_init");
     instrumented |= deleteFuncByName(M, "__llvm_profile_register_function");
     instrumented |= deleteFuncByName(M, "__llvm_profile_register_names_function");
-    instrumented |= deleteFuncByName(M, "__llvm_profile_runtime_user");
-    instrumented |= deleteGVarByName(M, "__llvm_profile_runtime");
+    if (verifyModule(M, &errs())) {
+        errs() << "Module verification failed after deleting profiling functions\n";
+        return false;
+    }
+
+    // Fix globals
     instrumented |= fixupUsedGlobals(M);
-    // Stop here to avoid rewriting the profiling and coverage structs
-    if (StripInitializersOnly)
-    {
+    if (verifyModule(M, &errs())) {
+        errs() << "Module verification failed after fixing llvm.used\n";
+        return false;
+    }
+
+    instrumented |= fixupCompilerUsedGlobals(M);
+    if (verifyModule(M, &errs())) {
+        errs() << "Module verification failed after fixing llvm.compiler.used\n";
+        return false;
+    }
+
+    instrumented |= deleteGVarByName(M, "__llvm_profile_runtime");
+    if (verifyModule(M, &errs())) {
+        errs() << "Module verification failed after deleting __llvm_profile_runtime\n";
+        return false;
+    }
+
+    // Early exit if `-strip-initializers-only` is set
+    if (StripInitializersOnly) {
         return instrumented;
     }
+
+    // Swap sections
     instrumented |= swapSectionWithPrefix(M, "__llvm_prf_cnts", ".data.profc");
     instrumented |= swapSectionWithPrefix(M, "__llvm_prf_names", ".rodata.profn");
+    if (verifyModule(M, &errs())) {
+        errs() << "Module verification failed after swapping sections\n";
+        return false;
+    }
+
+    // Convert structs
     instrumented |= convertStructs(M);
+    if (verifyModule(M, &errs())) {
+        errs() << "Module verification failed after converting structs\n";
+        return false;
+    }
+
+    // Annotate counters
     instrumented |= annotateCounters(M);
+    if (verifyModule(M, &errs())) {
+        errs() << "Module verification failed after annotating counters\n";
+        return false;
+    }
+
+    // Final section swap
     instrumented |= swapSectionWithPrefix(M, "__llvm_prf_data", ".rodata.profd");
     instrumented |= swapSectionWithPrefix(M, "__llvm_covmap", ".rodata.covmap");
+    if (verifyModule(M, &errs())) {
+        errs() << "Module verification failed after final section swap\n";
+        return false;
+    }
 
     return instrumented;
 }
@@ -744,10 +864,9 @@ PassPluginLibraryInfo getBPFCovPluginInfo()
                     });
                 // #2 Register for running at "default<O2>" // TODO > double-check
                 PB.registerPipelineStartEPCallback(
-                    [&](ModulePassManager &MPM, ArrayRef<PassBuilder::OptimizationLevel> OLevels)
+                    [&](ModulePassManager &MPM, OptimizationLevel OLevel)
                     {
-                        if (OLevels.size() == 1 &&
-                            OLevels[0] == PassBuilder::OptimizationLevel::O2)
+                        if (OLevel == OptimizationLevel::O2)
                         {
                             MPM.addPass(BPFCov());
                         }

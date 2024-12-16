@@ -7,6 +7,8 @@ project(bpfcov)
 #===============================================================================
 set(LT_LLVM_INSTALL_DIR "" CACHE PATH "LLVM installation directory")
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "") # works
+
 # 1.1 Check the "include" directory
 set(LT_LLVM_INCLUDE_DIR "${LT_LLVM_INSTALL_DIR}/include/llvm")
 if(NOT EXISTS "${LT_LLVM_INCLUDE_DIR}")
@@ -42,11 +44,11 @@ endif()
 # `find_package(llvm)`. So there's no need to add it here.
 list(APPEND CMAKE_PREFIX_PATH "${LT_LLVM_INSTALL_DIR}/lib/cmake/llvm/")
 
-find_package(LLVM 12.0.0 REQUIRED CONFIG)
+find_package(LLVM 15.0.0 REQUIRED CONFIG)
 
 # Another sanity check
-if(NOT "12" VERSION_EQUAL "${LLVM_VERSION_MAJOR}")
-  message(FATAL_ERROR "Found LLVM ${LLVM_VERSION_MAJOR}, but need LLVM 12")
+if(NOT "15" VERSION_EQUAL "${LLVM_VERSION_MAJOR}")
+  message(FATAL_ERROR "Found LLVM ${LLVM_VERSION_MAJOR}, but need LLVM 15")
 endif()
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")

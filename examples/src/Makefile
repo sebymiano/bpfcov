@@ -1,13 +1,12 @@
 OUTPUT := .output
-CLANG ?= clang
-OPT ?= opt
-LLC ?= llc
+CLANG ?= clang-15
+OPT ?= opt-15
+LLC ?= llc-15
 JQ ?= jq
 SED ?= sed
 ARCH := $(shell uname -m | $(SED) 's/x86_64/x86/' | $(SED) 's/aarch64/arm64/' | $(SED) 's/ppc64le/powerpc/' | $(SED) 's/mips.*/mips/')
 BPFCOVLIB_DIR ?= $(abspath ../../build/lib)
-BPFTOOL_LOCAL ?= ../tools/bpftool
-BPFTOOL = $(abspath $(BPFTOOL_LOCAL))
+BPFTOOL ?= ../tools/bpftool/src/bpftool
 LIBBPF_DIR := $(abspath ../libbpf)
 LIBBPF_SRC := $(abspath $(LIBBPF_DIR)/src)
 LIBBPF_OBJ := $(abspath $(OUTPUT)/libbpf.a)
@@ -41,7 +40,6 @@ cov: $(patsubst %,cov/%,$(EXAMPLES))
 distclean:
 	$(call msg,DISTCLEAN)
 	$(Q)rm -rf $(OUTPUT)
-	$(Q)unlink $(BPFTOOL)
 
 .PHONY: clean
 clean:
@@ -63,10 +61,8 @@ $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(OUTPU
 		INCLUDEDIR= LIBDIR= UAPIDIR= \
 		install
 
-# Link bpftool
-$(BPFTOOL): $(shell command -v bpftool)
-	$(call msg,BPFTOOL,$(BPFTOOL_LOCAL))
-	$(Q)$(shell ln -s $< $@)
+$(BPFTOOL):
+	$(call msg,BPFTOOL,$(BPFTOOL))
 	$(Q)$(BPFTOOL) version -j | $(JQ) -e '.features.skeletons' || $(error "A bptfool with the skeletons feature is required")
 
 # Generate vmlinux.h
@@ -116,12 +112,12 @@ $(OUTPUT)/cov/%.bpf.o: $(OUTPUT)/cov/%.bpf.cov.ll | $(OUTPUT)/cov
 
 # Generate the skeleton for the eBPF example as is
 $(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o $(BPFTOOL) | $(OUTPUT)
-	$(call msg,SKEL,$@)
+	$(call msg,SKEL-ORIGIN,$@)
 	$(Q)$(BPFTOOL) gen skeleton $< name $* > $@
 
 # Generate the skeleton for the instrumented ELF
 $(OUTPUT)/cov/%.skel.h: $(OUTPUT)/cov/%.bpf.o $(BPFTOOL) | $(OUTPUT)/cov
-	$(call msg,SKEL,$@)
+	$(call msg,SKEL_INSTR,$@)
 	$(Q)$(BPFTOOL) gen skeleton $< name $* > $@
 
 # Build userspace code

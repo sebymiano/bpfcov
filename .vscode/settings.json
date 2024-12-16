@@ -1,0 +1,9 @@
+{
+    "makefile.compileCommandsPath": "${workspaceFolder}/build/compile_commands.json",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "files.associations": {
+        "*.gpl": "gnuplot",
+        "*.def": "cpp",
+        "vmlinux.h": "c"
+    }
+}
