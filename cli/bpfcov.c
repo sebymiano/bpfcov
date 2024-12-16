@@ -1229,11 +1229,16 @@ int gen(struct root_args *args)
         fclose(outfp);
         log_fata(args, "could not get global data from map '%s'\n", args->pin[3]);
     }
-    long long int version = 0;
-    memcpy(&version, &((char *)covmap_data)[12], 4); // Version is the 3rd int in the coverage mapping header
-    version += 1;                                    // Version is 0 indexed
+    long long int version = 8;
+    // memcpy(&version, &((char *)covmap_data)[12], 4); // Version is the 3rd int in the coverage mapping header
+    // version += 1;                                    // Version is 0 indexed
     fwrite(&version, 1, sizeof(version), outfp);
     free(covmap_data);
+    // Binary Ids Size
+    long long int binary_ids_size = 0;
+    // log_info(args, "binary_ids_size = %lld\n", binary_ids_size);
+    fwrite(&binary_ids_size, 1, sizeof(binary_ids_size), outfp);
+
     // Data size
     long long int func_num = profd_info.value_size / 48; // 5 x i64 + 2 x i32 for each function
     fwrite(&func_num, 1, sizeof(func_num), outfp);
@@ -1267,6 +1272,27 @@ int gen(struct root_args *args)
         fclose(outfp);
         log_fata(args, "could not get global data from map '%s'\n", args->pin[1]);
     }
+
+    uintptr_t base_address = 0x100000; // Example base offset (can be any valid address base)
+    uintptr_t random_offset = rand() % 0x10000; // Generate a random offset within a range
+    uintptr_t random_base_address = base_address + random_offset;
+
+    for (int i = 0; i < func_num; i++) {
+        // I am going to patch profd_data because new LLVM version expects an address and we 
+        // cannot start from 0 on the counter's pointer
+        size_t size_cnt_struct = 8 + 8 + 8 + 8 + 8 + 4 + 4;
+        size_t offset = i * size_cnt_struct;
+
+        uint64_t *counter_addr = (uint64_t *)(profd_data + offset + 2 * sizeof(uint64_t));
+
+        // Update third_val to contain the new address
+        *counter_addr += random_base_address - (i * size_cnt_struct);
+
+        log_debug(args, "counter_addr (after modification) = %lu\n", *counter_addr);
+    }
+
+    counters_delta = random_base_address;
+    
     fwrite(profd_data, profd_info.value_size, 1, outfp);
 
     /* Write the counters part */
@@ -1295,6 +1321,10 @@ int gen(struct root_args *args)
     {
         fwrite(&b, 1, 1, outfp);
     }
+
+    /* Update CountersDelta and NamesDelta in Header */
+    fseek(outfp, 64, SEEK_SET); // 9th field (8 × 8 bytes = 64 bytes)
+    fwrite(&counters_delta, 1, sizeof(counters_delta), outfp);
 
     /* Close */
     fclose(outfp);
